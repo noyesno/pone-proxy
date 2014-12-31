@@ -1,11 +1,24 @@
 
-
 #Ref: Tcl nano proxy server http://wiki.tcl.tk/8833
 #Ref: Socks proxy http://wiki.tcl.tk/17263
 
+#------------------------------------------------------------------#
 
 source config.tcl
 source lib/polyfill.tcl
+
+#------------------------------------------------------------------#
+
+lappend auto_path ./lib
+
+source lib/proxy/http-0.1.tm
+source lib/proxy/ssl-0.1.tm
+
+#------------------------------------------------------------------#
+
+
+
+
 
 switch [llength $argv] {
     0 {
@@ -94,27 +107,45 @@ proc is_site_allowed {site} {
   foreach pattern $::config(sites.allowed) {
     # TODO: lowercase first 
     # ...
-    if [string match -nocase "*$pattern*" $site] {
+    if {$pattern eq "*" || [string match -nocase "*$pattern*" $site]} {
       return  true
     }
   }
   return false
 }
 
+
 proc accept {clientsock clienthost clientport} {
-    puts "Connection fom $clienthost:$clientport"
+  puts "Connection fom $clienthost:$clientport"
+
+  #puts [fconfigure $clientsock]
+  fconfigure $clientsock -translation auto -encoding binary
+  #puts [fconfigure $clientsock]
+
     set request [chan gets $clientsock]
+
+
+    binary scan $request H* hex
+
+    #-- puts "bytes: [string length $request]"
+    #-- puts "bytes: $hex"
+    #-- puts "bytes: [binary encode hex $request]"
+
+
     set dest   [lindex $request 1]
     set method [lindex $request 0]
     #chan configure $clientsock -translation binary
 
     puts "Request from $clienthost:$clientport -> $request"
+
     switch -- $method {
       CONNECT {
+        pone::proxy::http::accept $clientsock $request
         accept_connect $clientsock $request
       }
       GET  -
       POST {
+        pone::proxy::http::accept $clientsock $request
         accept_http    $clientsock $request
       }
       default {
@@ -246,19 +277,9 @@ proc proxy_connect {clientsock host port proto phost pport} {
 
 
 
+
+
 proc relay_connect {clientsock host port proto} {
-
-    set header [list]
-
-    while {[chan gets $clientsock line]>=0} {
-      if {[string length $line]==0} break
-
-      set pos [string first ":" $line]
-      set key [string trim [string range $line 0 $pos-1]]
-      set val [string trim [string range $line $pos+1 end]]
-      lappend header $key $val
-    }
-
     if [catch {set serversock [socket $host $port]} err] {
       puts "Warn: fail to connect to $host:$port"
       close $clientsock
@@ -301,8 +322,15 @@ proc accept_http {clientsock request} {
       return
     }
 
-    set serversock [socket $host $port]
-    chan puts $serversock $request
+
+    if [catch {set serversock [socket $host $port]} err] {
+      puts "Warn: fail to connect to $host:$port"
+      close $clientsock
+    }
+
+
+    pone::proxy::http::relay_request $clientsock $serversock
+
     chan configure $clientsock -blocking 0 -buffering none -translation binary
     chan configure $serversock -blocking 0 -buffering none -translation binary
     chan event $clientsock readable [list relay $clientsock $serversock -> $host]
@@ -318,7 +346,13 @@ proc accept_invalid {clientsock request} {
     close $clientsock
 }
 
-socket -server accept -myaddr $host $port
+if {$::config(ssl)} {
+  ssl_init
+  ::tls::socket -server accept -myaddr $host $port
+} else {
+  socket -server accept -myaddr $host $port
+}
+
 puts "Proxy started on $host:$port"
 
 vwait forever
