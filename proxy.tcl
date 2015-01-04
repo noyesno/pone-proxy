@@ -17,22 +17,24 @@ source lib/proxy/ssl-0.1.tm
 #------------------------------------------------------------------#
 
 
+set host "" ; set port ""
 
+for {set i 0} {$i<$argc} {incr i} {
+  set arg [lindex $argv $i]
 
-
-switch [llength $argv] {
-    0 {
-        lassign {0.0.0.0 8080} host port
+  switch -- $arg {
+    -c      { source [lindex $argv [incr i]] }
+    -l      -
+    -listen {
+      lassign [lreverse [split [lindex $argv [incr i]] ":"]] port host 
     }
-    1 {
-        lassign [list 0.0.0.0 $argv] host port
-    }
-    2 {
-        lassign $argv host port
-    }
+  }
 }
 
-set listenport [expr {[llength $argv] ? [lindex $argv 1] : 8080}]
+if {$host eq ""} { set host 0.0.0.0 } 
+if {$port eq ""} { set port 8080 } 
+
+
 
 array set ::buffer [list]
 array set ::vwait_vars [list]
@@ -115,6 +117,82 @@ proc is_site_allowed {site} {
 }
 
 
+
+
+proc accept_socks5 {sock request} {
+  binary scan $request {cc} ver nmethod
+
+  binary scan [read $sock $nmethod] {c*} methods
+
+  if {$nmethod == 1} {
+    puts "DEBUG $nmethod $methods"
+    chan puts -nonewline $sock [binary format {cc} $ver [lindex $methods 0]]
+    chan flush $sock
+  }
+
+  binary scan [read $sock 4] {cccc} ver cmd rsv atyp
+
+  puts "DEBUG: cmd = $cmd , atyp = $atyp"
+
+  set host ""
+  switch $atyp {
+    1 {
+      # IP4
+      read $sock 4
+    }
+    3 {
+      # Domain Name
+      binary scan [read $sock 1] {c} size
+      set host [read $sock $size]
+      puts "DEBUG: host = $host"
+    }
+    4 {
+      # IP6
+      read $sock 16
+    }
+    default {
+      puts "DEBUG: not match"
+    }
+  }
+
+  binary scan [read $sock 2] {S} port
+  puts "DEBUG: connect $host:$port"
+  # TODO: 
+
+
+  if [catch {set serversock [socket $host $port]} err] {
+    puts "Warn: fail to connect to $host:$port"
+    close $clientsock
+  }
+
+  puts "DEBGUG: [fconfigure $serversock]"
+
+# -peername {173.252.120.6 edge-star-shv-12-frc3.facebook.com 443}
+# -sockname {10.15.140.230 pcgiopl-icc41.internal.synopsys.com 39717}
+
+  lassign [fconfigure $serversock -peername] remote_ip remote_host remote_port
+  lassign [fconfigure $serversock -sockname] bind_ip bind_host bind_port
+  puts "DEBGUG: remote = $remote_ip $remote_host $remote_port"
+  puts "DEBGUG: bind   = $bind_ip   $bind_host   $bind_port"
+
+  puts "DEBUG: socks5 response"
+  #set data [binary format {c c c c ca* S} $ver 0x00 0x00 0x03 [string length $bind_ip] $bind_ip $bind_port]
+  set data [binary format {c c c c I S} $ver 0x00 0x00 0x01 0x00 $bind_port]
+  chan puts -nonewline $sock $data
+  puts "DEBUG: socks5 [binary encode hex $data]"
+
+  chan flush $sock
+  puts "DEBUG: socks5 response flush"
+
+  set clientsock $sock
+
+  puts "DEBUG: socks5 response copy"
+  chan configure $clientsock -blocking 0 -buffering none -translation binary
+  chan configure $serversock -blocking 0 -buffering none -translation binary
+  chan copy $clientsock $serversock -command [list relay_close $clientsock $serversock -> $host]
+  chan copy $serversock $clientsock -command [list relay_close $serversock $clientsock <- $host]
+}
+
 proc accept {clientsock clienthost clientport} {
   puts "Connection fom $clienthost:$clientport"
 
@@ -122,7 +200,16 @@ proc accept {clientsock clienthost clientport} {
   fconfigure $clientsock -translation auto -encoding binary
   #puts [fconfigure $clientsock]
 
-    set request [chan gets $clientsock]
+  set request [read $clientsock 2] 
+
+  if {[string index $request 0] eq "\x05"} {
+    puts "DEBUG: sock5 detected"
+    accept_socks5 $clientsock $request
+  }
+
+  #close $clientsock
+  return
+  set request [chan gets $clientsock]
 
 
     binary scan $request H* hex
@@ -137,6 +224,14 @@ proc accept {clientsock clienthost clientport} {
     #chan configure $clientsock -translation binary
 
     puts "Request from $clienthost:$clientport -> $request"
+
+    if [regexp {\w+ /.*} $request] {
+      puts  $clientsock "HTTP/1.1 200 OK"
+      puts  $clientsock ""
+      puts  $clientsock "Hello"
+      close $clientsock
+      return
+    }
 
     switch -- $method {
       CONNECT {
@@ -345,6 +440,10 @@ proc accept_invalid {clientsock request} {
     chan copy $clientsock stdout
     close $clientsock
 }
+
+
+
+
 
 if {$::config(ssl)} {
   ssl_init
