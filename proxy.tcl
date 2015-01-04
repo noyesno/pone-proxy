@@ -80,7 +80,7 @@ proc relay {from to dir host} {
 	# TODO: keep parent socket connection to reuse
 	# TODO
 	append ::buffer($to) ""
-	relay_write $to
+	relay_write $to $dir $host
 
         catch {chan close $from}
         catch {chan close $to}

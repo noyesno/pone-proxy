@@ -19,6 +19,11 @@ proc pone::proxy::http::accept {sock {request ""}} {
 
   dict set {} $sock res status  "HTTP/1.1 2OO OK"
 
+  if [eof $sock] {
+    puts "client closed"
+    return
+  }
+
   if {$request eq ""} {
     set request [chan gets $sock]
   }
@@ -27,6 +32,8 @@ proc pone::proxy::http::accept {sock {request ""}} {
 
   read_header $sock
   auth        $sock
+
+  return 1
 }
 
 proc pone::proxy::http::response {sock} {
@@ -109,11 +116,20 @@ proc pone::proxy::http::auth {sock} {
   set realm "Pone Proxy"
   dict set {} $sock res status "HTTP/1.1 407 Proxy Authentication Required"
   dict set {} $sock res header "Proxy-Authenticate" "Basic realm=\"$realm\""
+  dict set {} $sock res header "Content-Length" 0
 
   #-- TODO:
-  #-- response $sock
-  #-- accept   $sock
+  #-- TODO:
+  if {$::config(http.auth.keep-alive)} {
+    response $sock
+    accept   $sock
+    return
+  } else {
+    response $sock
+    close $sock
+    return -level 3 0
+  }
 
-  return 0
+
 }
 
