@@ -7,9 +7,9 @@
 lappend auto_path ./lib
 
 source config.tcl
-source lib/polyfill.tcl
 
 #------------------------------------------------------------------#
+package require polyfill
 package require proxy::socks5
 package require proxy::http
 package require proxy::ssl

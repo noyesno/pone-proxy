@@ -1,3 +1,6 @@
+# vim: syntax=tcl
+
+package provide polyfill 0.1
 
 namespace eval ::polyfill {
 
