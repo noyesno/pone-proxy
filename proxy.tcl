@@ -6,7 +6,7 @@
 ::tcl::tm::path add lib
 lappend auto_path ./lib
 
-source config.tcl
+source conf/config.tcl
 
 #------------------------------------------------------------------#
 package require polyfill

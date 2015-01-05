@@ -6,5 +6,7 @@ array set ::config {
   } 
 
   debug.http.header 1
+
+  http.auth            1
   http.auth.keep-alive 1
 }
