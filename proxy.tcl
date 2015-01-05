@@ -3,16 +3,16 @@
 #Ref: Socks proxy http://wiki.tcl.tk/17263
 
 #------------------------------------------------------------------#
+::tcl::tm::path add lib
+lappend auto_path ./lib
 
 source config.tcl
 source lib/polyfill.tcl
 
 #------------------------------------------------------------------#
-
-lappend auto_path ./lib
-
-source lib/proxy/http-0.1.tm
-source lib/proxy/ssl-0.1.tm
+package require proxy::socks5
+package require proxy::http
+package require proxy::ssl
 
 #------------------------------------------------------------------#
 
@@ -204,7 +204,8 @@ proc accept {clientsock clienthost clientport} {
 
   if {[string index $request 0] eq "\x05"} {
     puts "DEBUG: sock5 detected"
-    accept_socks5 $clientsock $request
+    #accept_socks5 $clientsock $request
+    accept_socks5_async $clientsock $request
   }
 
   #close $clientsock

@@ -1,135 +1,16 @@
 # vim: syntax=tcl
 
-namespace eval fsm {
-  variable .schema  [dict create]
-  variable .lut     [dict create]
-  variable .bind    [dict create]
-  variable .inst    [dict create]
+package provide proxy::socks5 0.1
 
-}
-
-proc fsm::define {name schema} {
-  variable .schema
-  variable .lut
-
-  dict set .schema $name $schema
-
-  for {set i 1 ; set ni [llength [lindex $schema 0]]} {$i < $ni} {incr i} {
-    set s [lindex $schema 0 $i]
-    for {set j 1 ; set nj [llength $schema]} {$j < $nj} {incr j} {
-      set e [lindex $schema $j 0]
-      set next_state [lindex $schema $j $i]
-      if [dict exists ${.lut} $name $s $e] continue
-      if {$next_state eq "-" || $next_state eq ""} continue
-      dict set .lut $name $s $e $next_state
-    }
-  }
-  return
-}
-
-proc fsm::init {name {state ""}} {
-  variable .inst
-
-  set id "fsm[info cmdcount]"
-
-  dict set .inst $id name  $name
-  dict set .inst $id state ""
-  dict set .inst $id args  ""
-
-  return $id
-}
-
-proc fsm::start {fsm {state ""}} {
-  # TODO: set state $state
-
-  goto $fsm $state
-  return
-}
-
-proc fsm::goto {fsm {state ""} {event ""}} {
-  variable .lut
-  variable .inst
-  variable .bind
-
-  set name [dict get ${.inst} $fsm name]
-  set next_state $state
-
-  dict set .inst $fsm state $next_state
-
-  if {![dict exists ${.bind} $name $next_state body]} {
-    return
-  }
-
-  set body [dict get ${.bind} $name $next_state body]
-
-  if {$body ne ""} {
-    $body $fsm $next_state $state $event
-  }
-  return
-}
-
-proc fsm::next {fsm {event "-"} {state "-"}} {
-  variable .lut
-  variable .inst
-  variable .bind
-
-  puts "DEBUG: next $state + $event => ..."
-  if {$state eq "" || $state eq "-"} {
-    set state [dict get ${.inst} $fsm state]
-  }
-
-  set name [dict get ${.inst} $fsm name]
-
-  set next_state [dict get ${.lut} $name $state $event]
-  puts "DEBUG: next $state + $event => $next_state"
-
-  goto $fsm $next_state $event
-  return
-}
-
-proc fsm::bind {name state {body ""}} {
-  variable .bind
-
-  set body_proc "::fsm::{[list state-body $name $state [info cmdcount]]}"
-  #TODO: unset this
-
-  proc $body_proc {fsm state pstate pevent} $body
-
-  dict set .bind $name $state body $body_proc
-  return
-}
-
-proc fsm::var {fsm var args} {
-  variable .inst
-
-  if [llength $args] {
-    dict set .inst $fsm args $var [lindex $args 0]
-    return
-  }
-
-  set ret [dict get ${.inst} $fsm args $var]
-
-  return $ret
-}
-
-
-fsm::define t {
-  {-   s1 s2 s3 s4}
-  {e1  s2 s3 s4 s5}
-  {e2  s2 s3 s1 s3}
-}
-
-set fsm [fsm::init t]
-fsm::next $fsm e2 s3
-fsm::next $fsm e2 s4
-
+package require pone::fsm
 
 fsm::define socks5 {
-  {-         accept   request connect reply relay}
-  {readable  request  -       -       -     -}
-  {-         -        connect -       -     -}
-  {connected -        -       reply   -     -}
-  {-         -        -       -       relay -}
+  {-         accept   request connect reply  relay close}
+  {readable  request  -       -       -      -     -}
+  {-         -        connect -       -      -     -}
+  {connected -        -       reply   -      -     -}
+  {-         -        -       -       relay  -     -}
+  {-         -        -       -       -      close -}
 }
 
 
@@ -254,13 +135,35 @@ fsm::bind socks5 relay {
   set clientsock $sock
 
   puts "DEBUG: socks5 response copy"
+
+
   chan configure $clientsock -blocking 0 -buffering none -translation binary
   chan configure $serversock -blocking 0 -buffering none -translation binary
-  chan copy $clientsock $serversock -command [list relay_close $clientsock $serversock -> $host]
-  chan copy $serversock $clientsock -command [list relay_close $serversock $clientsock <- $host]
+
+  fileevent $clientsock readable ""
+  fileevent $clientsock writable ""
+  fileevent $serversock readable ""
+  fileevent $serversock writable ""
+
+  #chan copy $clientsock $serversock -command [list relay_close $clientsock $serversock -> $host]
+  #chan copy $serversock $clientsock -command [list relay_close $serversock $clientsock <- $host]
+
+  chan copy $clientsock $serversock -command [list fsm::goto $fsm close "" $clientsock $serversock -> $host]
+  chan copy $serversock $clientsock -command [list fsm::goto $fsm close "" $serversock $clientsock <- $host]
 }
 
 fsm::bind socks5 close {
+  lassign $args from to dir host size err
+
+  if {$err ne ""} {
+    puts "Error: fcopy: $err $from $dir $to $host"
+  }
+
+  puts "DEBUG: socks5 close $from $dir $to $host"
+
+  # TODO: add catch
+  close $from
+  close $to
 }
 
 proc accept_socks5_async {sock request} {

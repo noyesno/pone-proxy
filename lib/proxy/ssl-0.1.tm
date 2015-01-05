@@ -1,5 +1,7 @@
 # vim: syntax=tcl
 
+package provide proxy::ssl 0.1
+
 proc ssl_init {} {
   package require tls
 

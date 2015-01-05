@@ -1,6 +1,6 @@
 # vim: syntax=tcl
 
-package provide pone-proxy-http 0.1
+package provide proxy::http 0.1
 
 
 namespace eval pone::proxy::http {}
@@ -102,6 +102,8 @@ proc pone::proxy::http::read_header {sock} {
 #
 proc pone::proxy::http::auth {sock} {
   variable {}
+
+  if {!$::config(http.auth)} return
 
 
   set credentials [dict get ${} $sock req header "Proxy-Authorization"]
