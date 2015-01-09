@@ -8,8 +8,8 @@ fsm::define socks5 {
   {-         accept   request connect reply  relay close}
   {readable  request  -       -       -      -     -}
   {-         -        connect -       -      -     -}
-  {connected -        -       reply   -      -     -}
-  {-         -        -       -       relay  -     -}
+  {connected -        -       reply   relay  -     -}
+  {fail      -        -       reply   close  -     -}
   {-         -        -       -       -      close -}
 }
 
@@ -42,7 +42,11 @@ fsm::bind socks5 accept {
 fsm::bind socks5 request {
   set sock    [fsm::var $fsm sock]
 
-  binary scan [read $sock 4] {cccc} ver cmd rsv atyp
+  set buf [read $sock 4]
+  if {[string length $buf]!=4} {
+    puts "IO Error: [binary encode hex $buf]"
+  }
+  binary scan $buf {cccc} ver cmd rsv atyp
 
   puts "DEBUG: cmd = $cmd , atyp = $atyp"
 
@@ -55,8 +59,9 @@ fsm::bind socks5 request {
     3 {
       # Domain Name
       binary scan [read $sock 1] {c} size
+      # TODO:
       set host [read $sock $size]
-      puts "DEBUG: host = $host"
+      puts "DEBUG: $size host = $host"
     }
     4 {
       # IP6
@@ -84,9 +89,13 @@ fsm::bind socks5 connect {
   set host    [fsm::var $fsm host]
   set port    [fsm::var $fsm port]
 
+  fsm::var $fsm serversock ""
+
   if [catch {set serversock [socket -async $host $port]} err] {
     puts "Warn: fail to connect to $host:$port"
-    close $clientsock
+    # close $clientsock
+    fsm::next $fsm fail
+    return
   }
 
   fsm::var $fsm serversock $serversock
@@ -100,30 +109,39 @@ fsm::bind socks5 connect {
 fsm::bind socks5 reply {
 
   set sock       [fsm::var $fsm sock]
-  set serversock [fsm::var $fsm serversock]
-  puts "DEBGUG: [fconfigure $serversock]"
 
-  set sock    [fsm::var $fsm sock]
-  set ver     0x05
 
 # -peername {173.252.120.6 edge-star-shv-12-frc3.facebook.com 443}
 # -sockname {10.15.140.230 pcgiopl-icc41.internal.synopsys.com 39717}
 
-  lassign [fconfigure $serversock -peername] remote_ip remote_host remote_port
-  lassign [fconfigure $serversock -sockname] bind_ip bind_host bind_port
-  puts "DEBGUG: remote = $remote_ip $remote_host $remote_port"
-  puts "DEBGUG: bind   = $bind_ip   $bind_host   $bind_port"
+  set bind_port 0
+  switch -- $pevent {
+    connected {
+      set serversock [fsm::var $fsm serversock]
+      puts "DEBGUG: [fconfigure $serversock]"
+      set reply_stat 0x00 ;# succeeded
+      lassign [fconfigure $serversock -peername] remote_ip remote_host remote_port
+      lassign [fconfigure $serversock -sockname] bind_ip bind_host bind_port
+      puts "DEBGUG: remote = $remote_ip $remote_host $remote_port"
+      puts "DEBGUG: bind   = $bind_ip   $bind_host   $bind_port"
+    }
+    fail {
+      set reply_stat 0x04 ;# Host unreachable
+      #
+    }
+  }
 
+  set ver        0x05
   puts "DEBUG: socks5 response"
   #set data [binary format {c c c c ca* S} $ver 0x00 0x00 0x03 [string length $bind_ip] $bind_ip $bind_port]
-  set data [binary format {c c c c I S} $ver 0x00 0x00 0x01 0x00 $bind_port]
+  set data [binary format {c c c c I S} $ver $reply_stat 0x00 0x01 0x00 $bind_port]
   chan puts -nonewline $sock $data
   puts "DEBUG: socks5 [binary encode hex $data]"
 
   chan flush $sock
   puts "DEBUG: socks5 response flush"
 
-  fsm::next $fsm ;# relay
+  fsm::next $fsm $pevent;# relay
 }
 
 fsm::bind socks5 relay {
@@ -161,9 +179,16 @@ fsm::bind socks5 close {
 
   puts "DEBUG: socks5 close $from $dir $to $host"
 
-  # TODO: add catch
-  close $from
-  close $to
+  set clientsock [fsm::var $fsm sock]
+  set serversock [fsm::var $fsm serversock]
+
+  dict for {sock -} [list $from 0 $to 0 $serversock 0 $clientsock 0] {
+    if {$sock ne ""} {
+      if [catch {close $sock} err] {
+        puts "DEBUG: close $sock fail"
+      }
+    }
+  }
 }
 
 proc accept_socks5_async {sock request} {

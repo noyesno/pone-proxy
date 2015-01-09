@@ -20,12 +20,18 @@ proc fsm::define {name schema} {
     set s [lindex $schema 0 $i]
     for {set j 1 ; set nj [llength $schema]} {$j < $nj} {incr j} {
       set e [lindex $schema $j 0]
+      if {$e eq "-"} { set e "*" }
+
       set next_state [lindex $schema $j $i]
-      if [dict exists ${.lut} $name $s $e] continue
       if {$next_state eq "-" || $next_state eq ""} continue
-      dict set .lut $name $s $e $next_state
-    }
-  }
+
+      if [dict exists ${.lut} $name $s $e] {
+        #TODO: check repeat 
+      } else {
+        dict set .lut $name $s $e $next_state
+      } 
+    } ;# end event iteration
+  } ;# end state iteration
   return
 }
 
@@ -70,20 +76,24 @@ proc fsm::goto {fsm {state ""} {event ""} args} {
   return
 }
 
-proc fsm::next {fsm {event "-"} {state "-"}} {
+#TODO: ::next $fms $event
+proc fsm::next {fsm {event ""} {state ""}} {
   variable .lut
   variable .inst
   variable .bind
 
-  puts "DEBUG: next $state + $event => ..."
   if {$state eq "" || $state eq "-"} {
     set state [dict get ${.inst} $fsm state]
+  }
+
+  if {$event eq ""} {
+    set event "*"
   }
 
   set name [dict get ${.inst} $fsm name]
 
   set next_state [dict get ${.lut} $name $state $event]
-  puts "DEBUG: next $state + $event => $next_state"
+  puts "DEBUG-FSM: next $state/$event -> $next_state"
 
   goto $fsm $next_state $event
   return
