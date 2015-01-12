@@ -26,7 +26,7 @@ fsm::bind socks5 accept {
   fsm::var $fsm version $ver
 
   if {$nmethod == 1} {
-    puts "DEBUG $nmethod $methods"
+    #-- puts "DEBUG $nmethod $methods"
     chan puts -nonewline $sock [binary format {cc} $ver [lindex $methods 0]]
     chan flush $sock
   }
@@ -45,10 +45,13 @@ fsm::bind socks5 request {
   set buf [read $sock 4]
   if {[string length $buf]!=4} {
     puts "IO Error: [binary encode hex $buf]"
+    close $sock
+    return
   }
+
   binary scan $buf {cccc} ver cmd rsv atyp
 
-  puts "DEBUG: cmd = $cmd , atyp = $atyp"
+  # puts "DEBUG-SOCKS5: cmd = $cmd , atyp = $atyp"
 
   set host ""
   switch $atyp {
@@ -61,7 +64,7 @@ fsm::bind socks5 request {
       binary scan [read $sock 1] {c} size
       # TODO:
       set host [read $sock $size]
-      puts "DEBUG: $size host = $host"
+      # puts "DEBUG-SOCKS5: $size host = $host"
     }
     4 {
       # IP6
@@ -73,7 +76,8 @@ fsm::bind socks5 request {
   }
 
   binary scan [read $sock 2] {S} port
-  puts "DEBUG: connect $host:$port"
+  lassign [fconfigure $sock -peername] client_addr client_host client_port
+  puts "DEBUG-SOCKS5: request $client_addr:$client_port -> $host:$port"
   # TODO: 
 
   fsm::var $fsm host $host
@@ -118,12 +122,12 @@ fsm::bind socks5 reply {
   switch -- $pevent {
     connected {
       set serversock [fsm::var $fsm serversock]
-      puts "DEBGUG: [fconfigure $serversock]"
+      #-- puts "DEBUG: [fconfigure $serversock]"
       set reply_stat 0x00 ;# succeeded
       lassign [fconfigure $serversock -peername] remote_ip remote_host remote_port
       lassign [fconfigure $serversock -sockname] bind_ip bind_host bind_port
-      puts "DEBGUG: remote = $remote_ip $remote_host $remote_port"
-      puts "DEBGUG: bind   = $bind_ip   $bind_host   $bind_port"
+      #-- puts "DEBGUG: remote = $remote_ip $remote_host $remote_port"
+      #-- puts "DEBGUG: bind   = $bind_ip   $bind_host   $bind_port"
     }
     fail {
       set reply_stat 0x04 ;# Host unreachable
@@ -132,14 +136,14 @@ fsm::bind socks5 reply {
   }
 
   set ver        0x05
-  puts "DEBUG: socks5 response"
+  #puts "DEBUG-SOCKS5: response"
   #set data [binary format {c c c c ca* S} $ver 0x00 0x00 0x03 [string length $bind_ip] $bind_ip $bind_port]
   set data [binary format {c c c c I S} $ver $reply_stat 0x00 0x01 0x00 $bind_port]
   chan puts -nonewline $sock $data
-  puts "DEBUG: socks5 [binary encode hex $data]"
+  #puts "DEBUG-SOCKS5: socks5 [binary encode hex $data]"
 
   chan flush $sock
-  puts "DEBUG: socks5 response flush"
+  #puts "DEBUG-SOCKS5: socks5 response flush"
 
   fsm::next $fsm $pevent;# relay
 }
@@ -152,7 +156,7 @@ fsm::bind socks5 relay {
 
   set clientsock $sock
 
-  puts "DEBUG: socks5 response copy"
+  #puts "DEBUG-SOCKS5: socks5 response copy"
 
 
   chan configure $clientsock -blocking 0 -buffering none -translation binary
@@ -177,7 +181,7 @@ fsm::bind socks5 close {
     puts "Error: fcopy: $err $from $dir $to $host"
   }
 
-  puts "DEBUG: socks5 close $from $dir $to $host"
+  puts "DEBUG-SOCKS5: close $from $dir $to $host , $size bytes relay"
 
   set clientsock [fsm::var $fsm sock]
   set serversock [fsm::var $fsm serversock]

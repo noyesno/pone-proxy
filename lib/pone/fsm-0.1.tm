@@ -10,6 +10,10 @@ namespace eval fsm {
 
 }
 
+proc fsm::debug {args} {
+  # puts "DEBUG-FSM: [join $args]"
+}
+
 proc fsm::define {name schema} {
   variable .schema
   variable .lut
@@ -93,7 +97,7 @@ proc fsm::next {fsm {event ""} {state ""}} {
   set name [dict get ${.inst} $fsm name]
 
   set next_state [dict get ${.lut} $name $state $event]
-  puts "DEBUG-FSM: next $state/$event -> $next_state"
+  debug "next $state/$event -> $next_state"
 
   goto $fsm $next_state $event
   return

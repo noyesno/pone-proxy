@@ -193,8 +193,15 @@ proc accept_socks5 {sock request} {
   chan copy $serversock $clientsock -command [list relay_close $serversock $clientsock <- $host]
 }
 
+proc accept_reject {clientsock request} {
+  append request [chan read $clientsock 64]
+  lassign [fconfigure $clientsock -peername] client_addr client_host client_port
+  puts "reject $clientsock $client_addr:$client_port $request"
+  close $clientsock
+}
+
 proc accept {clientsock clienthost clientport} {
-  puts "Connection fom $clienthost:$clientport"
+  #-- puts "Connection fom $clienthost:$clientport"
 
   #puts [fconfigure $clientsock]
   fconfigure $clientsock -translation auto -encoding binary
@@ -203,14 +210,19 @@ proc accept {clientsock clienthost clientport} {
   set request [read $clientsock 2] 
 
   if {[string index $request 0] eq "\x05"} {
-    puts "DEBUG: sock5 detected"
+    #-- puts "DEBUG: sock5 detected"
     #accept_socks5 $clientsock $request
     accept_socks5_async $clientsock $request
+    return
+  }
+
+  if {!$::config(proxy.http)} {
+    accept_reject $clientsock $request
+    return
   }
 
   #close $clientsock
-  return
-  set request [chan gets $clientsock]
+  append request [chan gets $clientsock]
 
 
     binary scan $request H* hex
