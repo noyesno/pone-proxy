@@ -39,10 +39,12 @@ proc fsm::define {name schema} {
   return
 }
 
-proc fsm::init {name {state ""}} {
+proc fsm::init {name {id ""}} {
   variable .inst
 
-  set id "fsm[info cmdcount]"
+  if {$id eq ""} {
+    set id "fsm[info cmdcount]"
+  }
 
   dict set .inst $id name  $name
   dict set .inst $id state ""
@@ -103,24 +105,43 @@ proc fsm::next {fsm {event ""} {state ""}} {
   return
 }
 
-proc fsm::bind {name state {body ""}} {
+proc fsm::bind {name state args} {
+  # TODO: -ns namespace
   variable .bind
+  set argc [llength $args]
 
-  set body_proc "::fsm::{[list state-body $name $state [info cmdcount]]}"
+  set body  [lindex $args end]
+  set fname [lindex $args end-1]
+  if {$fname eq ""} {
+    set fname "::fsm::{[list state-body $name $state [info cmdcount]]}"
+  }
+
+  if {$argc==0} {
+    # TODO
+    return
+  }
+  # TODO:
   #TODO: unset this
+  proc $fname {fsm state pstate pevent args} $body
 
-  proc $body_proc {fsm state pstate pevent args} $body
-
-  dict set .bind $name $state body $body_proc
+  dict set .bind $name $state body $fname
   return
 }
 
 proc fsm::var {fsm var args} {
   variable .inst
 
-  if [llength $args] {
+  set argc [llength $args]
+
+  if {$argc==1} {
     dict set .inst $fsm args $var [lindex $args 0]
     return
+  }
+
+  if {$argc==2 && [lindex $args 0] eq "-default"} {
+    set val [lindex $args 1]
+    catch {set val [dict get ${.inst} $fsm args $var]}
+    return $val
   }
 
   set ret [dict get ${.inst} $fsm args $var]

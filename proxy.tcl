@@ -11,7 +11,8 @@ source conf/config.tcl
 #------------------------------------------------------------------#
 package require polyfill
 package require proxy::socks5
-package require proxy::http
+#package require proxy::http
+package require proxy::httpfsm
 package require proxy::ssl
 
 #------------------------------------------------------------------#
@@ -204,10 +205,23 @@ proc accept {clientsock clienthost clientport} {
   #-- puts "Connection fom $clienthost:$clientport"
 
   #puts [fconfigure $clientsock]
-  fconfigure $clientsock -translation auto -encoding binary
+  chan configure $clientsock -blocking 0
+  chan configure $clientsock -translation binary -encoding binary
   #puts [fconfigure $clientsock]
 
+  chan event $clientsock readable [list accept_read $clientsock $clienthost $clientport]
+
+  return
+}
+
+proc accept_read {clientsock clienthost clientport} {
   set request [read $clientsock 2] 
+  set nbytes  [string length $request]
+  if {$nbytes!=2} {
+    puts "Invalid Connection: $clienthost:$clientport # $nbytes , [expr {[eof $clientsock]?"eof":""}]"
+    close $clientsock
+    return
+  }
 
   if {[string index $request 0] eq "\x05"} {
     #-- puts "DEBUG: sock5 detected"
@@ -216,172 +230,19 @@ proc accept {clientsock clienthost clientport} {
     return
   }
 
-  if {!$::config(proxy.http)} {
-    accept_reject $clientsock $request
+  if {$::config(proxy.http) || $::config(server.http)} {
+    # TODO: CHECK $request
+    accept_http_async $clientsock $request
     return
   }
 
-  #close $clientsock
-  append request [chan gets $clientsock]
+  accept_reject $clientsock $request
 
-
-    binary scan $request H* hex
-
-    #-- puts "bytes: [string length $request]"
-    #-- puts "bytes: $hex"
-    #-- puts "bytes: [binary encode hex $request]"
-
-
-    set dest   [lindex $request 1]
-    set method [lindex $request 0]
-    #chan configure $clientsock -translation binary
-
-    puts "Request from $clienthost:$clientport -> $request"
-
-    if [regexp {\w+ /.*} $request] {
-      puts  $clientsock "HTTP/1.1 200 OK"
-      puts  $clientsock ""
-      puts  $clientsock "Hello"
-      close $clientsock
-      return
-    }
-
-    switch -- $method {
-      CONNECT {
-        pone::proxy::http::accept $clientsock $request
-        accept_connect $clientsock $request
-      }
-      GET  -
-      POST {
-        pone::proxy::http::accept $clientsock $request
-        accept_http    $clientsock $request
-      }
-      default {
-        puts "FAIL: $method $request"
-        accept_invalid $clientsock $request
-      }
-    }
-}
-
-# CONNECT www.google.com:443 HTTP/1.1
-proc accept_connect {clientsock request} {
-    set dest   [lindex $request 1]
-    set method [lindex $request 0]
-    set proto  [lindex $request 2]
-
-    if [regexp {^([^:/]+)(?::([0-9]+))?} $dest -> host port] {
-      puts "DEBUG: accept_connect $host $port $proto"
-    }
-
-    if {![is_site_allowed $host]} {
-      puts "DEBUG: refuse $host"
-      chan close $clientsock
-      return
-    }
-
-
-    # proxy_connect $clientsock $host $port $proto $phost $pport
-    relay_connect $clientsock $host $port $proto
+  return
 }
 
 
-proc proxy_connect {clientsock host port proto phost pport} {
-    set serversock [socket $phost $pport]
 
-    #- puts $clientsock "HTTP/1.1 200 Tunnel Established"
-    #- puts "$proto 200 Tunnel Established"
-    #- #puts $clientsock "Proxy-Agent: Tcl Proxy"
-    #- puts $clientsock ""
-    #- flush $clientsock
-    #
-
-    # this line can move to before puts $serversock
-    chan configure $serversock -blocking 0
-
-    set host_shadowed [string reverse $host]
-    set host_shadowed $host
-    chan puts $serversock "$method $host_shadowed:$port $proto"
-
-    while {[chan gets $clientsock line]>=0} {
-      puts "DEBUG: $line"
-      if  [string equal -nocase -length 5 $line "Host:"] {
-        puts $serversock "Host: $host_shadowed"
-      } else {
-        #puts $serversock [string reverse $line]
-        chan puts $serversock $line
-      }
-
-      if {[string length $line]==0} break
-    }
-    chan flush $serversock
-
-
-
-    set    ::buffer($serversock) ""
-    chan event $serversock readable [list read_reply_headers $serversock $clientsock <- $host]
-
-    set timer [after 3000 "set ::vwait_vars(proxy,$serversock) timeout"]
-    vwait vwait_vars(proxy,$serversock)
-    after cancel $timer
-
-    switch -- $::vwait_vars(proxy,$serversock) {
-      timeout {
-	# ...
-	puts "DEBUG: Connect Timeout"
-      }
-      eof {
-	# ...
-	puts "WARN: Connect EOF. Possibbly Wall Met"
-
-	# DONT try to send message to client. It will not be shown.
-	# Or, the message need to be based on HTTPS protocal
-	
-
-	chan puts $clientsock "HTTP/1.1 400 Closed"
-	chan puts $clientsock ""
-	chan puts $clientsock "Wall Met"
-	chan flush $clientsock
-
-	catch {chan close $serversock}
-	catch {chan close $clientsock}
-	#TODO: how to handle keep-alive in such situation
-	return
-      }
-      connected {
-        set status_line [lindex $::buffer($serversock) 0] 
-
-        set    ::buffer($serversock) [join $::buffer($serversock) "\r\n"]
-        append ::buffer($serversock) "\r\n"
-
-        puts "DEBUG: $::buffer($serversock)"
-	if {[string first 200 $status_line]>0} {
-	  # Established
-	  puts "DEBUG: Connection Established"
-	} else {
-	  # Has Response, But Fail
-	  puts "DEBUG: Connection Response Invalid"
-	}
-
-      }
-    }
-
-    unset ::vwait_vars(proxy,$serversock)
-
-    chan configure $clientsock -blocking 0 -buffering none -translation binary
-    chan configure $serversock -blocking 0 -buffering none -translation binary
-
-    chan puts -nonewline $clientsock $::buffer($serversock)
-    chan flush $clientsock
-    unset ::buffer($serversock)
-
-    # relay both direction
-    # TODO: use fileevent readable for clientsock to support keep-alive???
-    # XXX: Proxy-Connection: keep-alive means not auto close client sock???
-    # INFO: Tcl 8.5.2 error out 'channel $to is busy'
-    chan copy $clientsock $serversock -command [list relay_close $clientsock $serversock -> $host]
-    chan copy $serversock $clientsock -command [list relay_close $serversock $clientsock <- $host]
-
-}
 
 
 
@@ -412,47 +273,6 @@ proc relay_connect {clientsock host port proto} {
 }
 
 
-proc accept_http {clientsock request} {
-    set dest   [lindex $request 1]
-    set method [lindex $request 0]
-
-    #set port "" 
-    if [regexp {^([^:]+)://([^:/]+)(?::([0-9]+))?} $dest -> scheme host port] {
-      puts "accept_http $scheme://$host:$port"
-    } else {
-      puts "DEBUG: match fail $dest"
-    }
-    if {$port eq ""} {set port 80}
-
-    if {![is_site_allowed $host]} {
-      #puts "DEBUG: refuse $host"
-      chan close $clientsock
-      return
-    }
-
-
-    if [catch {set serversock [socket $host $port]} err] {
-      puts "Warn: fail to connect to $host:$port"
-      close $clientsock
-    }
-
-
-    pone::proxy::http::relay_request $clientsock $serversock
-
-    chan configure $clientsock -blocking 0 -buffering none -translation binary
-    chan configure $serversock -blocking 0 -buffering none -translation binary
-    chan event $clientsock readable [list relay $clientsock $serversock -> $host]
-    chan event $serversock readable [list relay $serversock $clientsock <- $host]
-}
-
-proc accept_invalid {clientsock request} {
-    set dest   [lindex $request 1]
-    set method [lindex $request 0]
-
-    puts "Invalid: $request"
-    chan copy $clientsock stdout
-    close $clientsock
-}
 
 
 

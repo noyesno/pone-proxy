@@ -1,6 +1,154 @@
 # vim: syntax=tcl
 
-package provide proxy::http 0.1
+package provide proxy::httpfsm 0.1
+
+package require pone::fsm
+
+fsm::define http {
+  {-          accept   request serve   proxy connect reply  relay close}
+  {readable   request  request -       -     -       -      -     -}
+  {keep-alive -        -       accept  -     -       -      -     -}
+}
+
+
+fsm::bind http accept {
+
+  set sock    [fsm::var $fsm sock]
+  set request [fsm::var $fsm request]
+  fsm::var $fsm request ""
+
+  set ret [pone::proxy::http::accept $sock $request]
+
+
+  if {$ret} {
+    fileevent $sock readable [subst {
+      fileevent $sock readable ""
+      fsm::next $fsm readable
+    }]
+  } else {
+    fsm::goto $fsm close
+  }
+  return
+}
+
+fsm::bind http request {
+  set sock    [fsm::var $fsm sock]
+
+  set ret [pone::proxy::http::read_header $sock]
+
+  if {$ret==0} {
+    fileevent $sock readable [subst {
+      fileevent $sock readable ""
+      fsm::next $fsm readable
+    }]
+    return
+  }
+
+  pone::proxy::http::auth $sock
+
+  set req  [pone::proxy::http::get $sock req]
+  set method [dict get $req method]
+  set dest   [dict get $req path]
+
+  if {[string index $dest 0] eq "/"} {
+    fsm::goto $fsm serve
+  }  else {
+    fsm::goto $fsm proxy
+  }
+
+  return
+}
+
+
+fsm::bind http serve {
+  set sock    [fsm::var $fsm sock]
+
+  set req    [pone::proxy::http::get $sock req]
+  set method [dict get $req method]
+  set dest   [dict get $req path]
+
+  pone::proxy::http::serve $sock $method $dest
+
+  # TODO: check keep-alive
+  # close $sock
+  fileevent $sock readable [subst {
+    fileevent $sock readable ""
+    fsm::goto $fsm accept
+  }]
+
+  #TODO:  fsm::goto $fsm close
+}
+
+fsm::bind http proxy {
+  set sock    [fsm::var $fsm sock]
+
+  set req    [pone::proxy::http::get $sock req]
+  set method [dict get $req method]
+  set dest   [dict get $req path]
+
+  pone::proxy::http::proxy $sock $method $dest
+}
+
+
+fsm::bind http relay {
+  set sock       [fsm::var $fsm sock]
+  set serversock [fsm::var $fsm serversock]
+  set host       [fsm::var $fsm host]
+  set port       [fsm::var $fsm port]
+
+  set clientsock $sock
+
+  #puts "DEBUG-SOCKS5: socks5 response copy"
+
+
+  chan configure $clientsock -blocking 0 -buffering none -translation binary
+  chan configure $serversock -blocking 0 -buffering none -translation binary
+
+  fileevent $clientsock readable ""
+  fileevent $clientsock writable ""
+  fileevent $serversock readable ""
+  fileevent $serversock writable ""
+
+  #chan copy $clientsock $serversock -command [list relay_close $clientsock $serversock -> $host]
+  #chan copy $serversock $clientsock -command [list relay_close $serversock $clientsock <- $host]
+
+  chan copy $clientsock $serversock -command [list fsm::goto $fsm close "" $clientsock $serversock -> $host]
+  chan copy $serversock $clientsock -command [list fsm::goto $fsm close "" $serversock $clientsock <- $host]
+}
+
+fsm::bind http close {
+  lassign $args from to dir host size err
+
+  if {$err ne ""} {
+    puts "Error: fcopy: $err $from $dir $to $host"
+  }
+
+  if {$dir ne ""} {
+    puts "DEBUG-HTTP: close $from $dir $to $host , $size bytes relay"
+  }
+
+  set clientsock [fsm::var $fsm sock]
+  set serversock [fsm::var $fsm serversock -default ""]
+
+  dict for {sock -} [list $from 0 $to 0 $serversock 0 $clientsock 0] {
+    if {$sock ne ""} {
+      if [catch {close $sock} err] {
+        puts "DEBUG: close $sock fail"
+      }
+    }
+  }
+}
+
+proc accept_http_async {sock request} {
+  fconfigure $sock -blocking 0 -translation auto
+
+  set fsm [fsm::init http]
+  fsm::var $fsm sock    $sock
+  fsm::var $fsm request $request
+
+  fsm::start $fsm accept
+}
+
 
 
 namespace eval pone::proxy::http {}
@@ -8,7 +156,7 @@ namespace eval pone::proxy::http {}
 proc pone::proxy::http::get {sock key} {
   variable {}
 
-  return [dict get ${} $key]
+  return [dict get ${} $sock $key]
 }
 
 proc pone::proxy::http::accept {sock {request ""}} {
@@ -19,17 +167,19 @@ proc pone::proxy::http::accept {sock {request ""}} {
 
   dict set {} $sock res status  "HTTP/1.1 2OO OK"
 
+
+  append request [chan gets $sock]
+
   if [eof $sock] {
     puts "client closed: [binary encode hex $request]"
-    return 1
-  }
-
-  if {$request eq ""} {
-    set request [chan gets $sock]
+    return 0
   }
 
   set method [lindex $request 0]
   set dest   [lindex $request 1]
+
+  dict set {} $sock req method $method
+  dict set {} $sock req path   $dest
 
   if {[lsearch $::config(http.method.allow) $method]<0} {
     puts "FAIL: invalid http request: $method $request"
@@ -40,17 +190,18 @@ proc pone::proxy::http::accept {sock {request ""}} {
   }
 
   lassign [fconfigure $sock -peername] client_addr client_host client_port
-  puts "HTTP-DEBUG: $client_host:$client_port -> $request"
+  puts "DEBUG-HTTP: $client_host:$client_port -> $request"
   dict set {} $sock req request $request
 
-  read_header $sock
-  auth        $sock
+  set header [dict create]
+  dict set header "Proxy-Authenticate"  ""
+  dict set header "Proxy-Authorization" ""
+  dict set {} $sock req header $header
 
-  if {[string index $dest 0] eq "/"} {
-    serve $sock $method $dest
-    return 1
-  }
+  return 1
+}
 
+proc pone::proxy::http::proxy {args} {
     switch -- $method {
       CONNECT {
         accept_connect $clientsock $request
@@ -68,13 +219,14 @@ proc pone::proxy::http::accept {sock {request ""}} {
 }
 
 proc pone::proxy::http::serve {sock method path} {
-  puts  $sock "HTTP/1.1 200 OK"
-  puts  $sock ""
-  puts  $sock "Hello"
+  set body "Hello $method $path"
 
-  # close $sock
+  puts $sock "HTTP/1.1 200 OK"
+  puts $sock "Content-Length: [string bytelength $body]"
+  puts $sock ""
+  puts -nonewline $sock $body
+  flush $sock
 
-  accept $sock
   return
 }
 
@@ -109,24 +261,19 @@ proc pone::proxy::http::read_header {sock} {
   variable {}
 
   # TODO: performance
-  set header [dict create]
-
-
-  dict set header "Proxy-Authenticate"  ""
-  dict set header "Proxy-Authorization" ""
 
   while {[chan gets $sock line]>=0} {
-    if {[string length $line]==0} break
+    if {[string length $line]==0} {
+      return 1
+    }
 
     set pos [string first ":" $line]
     set key [string trim [string range $line 0 $pos-1]]
     set val [string trim [string range $line $pos+1 end]]
-    dict set header $key $val
+    dict set {} $sock req header $key $val
   }
 
-  dict set {} $sock req header $header
-  puts "DEBUG: $header"
-  return $header
+  return 0
 }
 
 #
