@@ -85,8 +85,9 @@ fsm::bind http proxy {
   set req    [pone::proxy::http::get $sock req]
   set method [dict get $req method]
   set dest   [dict get $req path]
+  set proto  [dict get $req proto]
 
-  pone::proxy::http::proxy $sock $method $dest
+  pone::proxy::http::proxy $sock $method $dest $proto
 }
 
 
@@ -162,12 +163,6 @@ proc pone::proxy::http::get {sock key} {
 proc pone::proxy::http::accept {sock {request ""}} {
   variable {}
 
-  dict set {} $sock req header [dict create] ;# request
-  dict set {} $sock res header [dict create] ;# response
-
-  dict set {} $sock res status  "HTTP/1.1 2OO OK"
-
-
   append request [chan gets $sock]
 
   if [eof $sock] {
@@ -175,23 +170,32 @@ proc pone::proxy::http::accept {sock {request ""}} {
     return 0
   }
 
+  if {[catch {llength $request}] || [llength $request]!=3} {
+    # invalide HTTP request
+    puts "Invaid HTTP request: [binary encode hex $request]"
+    return 0
+  }
+
   set method [lindex $request 0]
   set dest   [lindex $request 1]
-
-  dict set {} $sock req method $method
-  dict set {} $sock req path   $dest
+  set proto  [lindex $request 2]
 
   if {[lsearch $::config(http.method.allow) $method]<0} {
     puts "FAIL: invalid http request: $method $request"
     return 0
   }
 
-  if {[string index $dest 0] eq "/"} {
-  }
+  dict set {} $sock req request $request
+  dict set {} $sock req header [dict create] ;# request
+  dict set {} $sock res header [dict create] ;# response
+  dict set {} $sock res status  "HTTP/1.1 2OO OK"
+  dict set {} $sock req method $method
+  dict set {} $sock req path   $dest
+  dict set {} $sock req proto  $proto
 
   lassign [fconfigure $sock -peername] client_addr client_host client_port
-  puts "DEBUG-HTTP: $client_host:$client_port -> $request"
-  dict set {} $sock req request $request
+  #TODO: has reverse dns lookup here?
+  puts "DEBUG-HTTP: $client_host/$client_addr:$client_port -> $request"
 
   set header [dict create]
   dict set header "Proxy-Authenticate"  ""
@@ -201,18 +205,17 @@ proc pone::proxy::http::accept {sock {request ""}} {
   return 1
 }
 
-proc pone::proxy::http::proxy {args} {
+proc pone::proxy::http::proxy {sock method dest proto} {
     switch -- $method {
       CONNECT {
-        accept_connect $clientsock $request
+        accept_connect $sock $method $dest $proto
       }
       GET  -
       POST {
-        accept_http    $clientsock $request
+        accept_http    $sock $method $dest $proto
       }
       default {
-        puts "FAIL: $method $request"
-        accept_invalid $clientsock $request
+        accept_invalid $sock $method $dest $proto
       }
     }
   return 1
@@ -324,18 +327,13 @@ proc pone::proxy::http::auth {sock} {
 
 }
 
-proc pone::proxy::http::accept_invalid {clientsock request} {
-    set dest   [lindex $request 1]
-    set method [lindex $request 0]
-
-    puts "Invalid: $request"
+proc pone::proxy::http::accept_invalid {clientsock method dest proto} {
+    puts "FAIL: Unsupported proxy method: $method $dest $proto"
     chan copy $clientsock stdout
     close $clientsock
 }
 
-proc pone::proxy::http::accept_http {clientsock request} {
-    set dest   [lindex $request 1]
-    set method [lindex $request 0]
+proc pone::proxy::http::accept_http {clientsock method dest proto} {
 
     #set port "" 
     if [regexp {^([^:]+)://([^:/]+)(?::([0-9]+))?} $dest -> scheme host port] {
@@ -367,10 +365,7 @@ proc pone::proxy::http::accept_http {clientsock request} {
 }
 
 # CONNECT www.google.com:443 HTTP/1.1
-proc pone::proxy::http::accept_connect {clientsock request} {
-    set dest   [lindex $request 1]
-    set method [lindex $request 0]
-    set proto  [lindex $request 2]
+proc pone::proxy::http::accept_connect {clientsock method dest proto} {
 
     if [regexp {^([^:/]+)(?::([0-9]+))?} $dest -> host port] {
       puts "DEBUG: accept_connect $host $port $proto"
