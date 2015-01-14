@@ -10,6 +10,7 @@ fsm::define http {
   {keep-alive -        -       accept  -     -       -      -     -}
 }
 
+# TODO: add a dispatch
 
 fsm::bind http accept {
 
@@ -80,6 +81,13 @@ fsm::bind http serve {
 }
 
 fsm::bind http proxy {
+
+  if {!$::config(proxy.http)} {
+    fsm::goto $fsm close
+    return
+  }
+
+
   set sock    [fsm::var $fsm sock]
 
   set req    [pone::proxy::http::get $sock req]
@@ -135,6 +143,8 @@ fsm::bind http close {
     if {$sock ne ""} {
       if [catch {close $sock} err] {
         puts "DEBUG: close $sock fail"
+      } else {
+        #puts "DEBUG: close $sock succ"
       }
     }
   }
@@ -152,10 +162,55 @@ proc accept_http_async {sock request} {
 
 
 
-namespace eval pone::proxy::http {}
+namespace eval pone::proxy::http {
+  variable handlers [dict create]
+}
 
-proc pone::proxy::http::get {sock key} {
+proc pone::proxy::http::register {pattern args} {
+  variable handlers
+
+  set is_filter 0
+  set rank      1
+  set hname     [lindex $args end 0]
+  set hargv     [lindex $args end 1]
+
+  for {set i 0 ; set argc [llength $args] ; incr argc -1} { $i<$argc } {incr i} {
+    set arg [lindex $args $i]
+    switch -- $arg {
+      -filter { set is_filter 1 }
+      -rank   { set rank [lindex $args [incr i]] }
+      default {
+        #
+      }
+    }
+  }
+
+  dict set handlers $pattern [list $rank $is_filter $hname $hargv]
+}
+
+namespace eval pone::proxy::http::handler {
+  #
+  pone::proxy::http::register * -rank 0 [list pone::proxy::http::handler::default ]
+}
+
+proc pone::proxy::http::handler::default {sock args} {
+  set body [pone::proxy::http::get $sock]
+
+  puts $sock "HTTP/1.1 200 OK"
+  puts $sock "Content-Type: text/plain"
+  puts $sock "Content-Length: [string bytelength $body]"
+  puts $sock ""
+  puts -nonewline $sock $body
+  flush $sock
+}
+
+
+proc pone::proxy::http::get {sock {key ""}} {
   variable {}
+
+  if {$key eq ""} {
+    return [dict get ${} $sock]
+  }
 
   return [dict get ${} $sock $key]
 }
@@ -222,13 +277,24 @@ proc pone::proxy::http::proxy {sock method dest proto} {
 }
 
 proc pone::proxy::http::serve {sock method path} {
-  set body "Hello $method $path"
+  variable handlers
 
-  puts $sock "HTTP/1.1 200 OK"
-  puts $sock "Content-Length: [string bytelength $body]"
-  puts $sock ""
-  puts -nonewline $sock $body
-  flush $sock
+  set handler_matched [list]
+  dict for {pattern val} $handlers {
+    if {[string match $pattern $path]} {
+      lappend handler_matched $val
+    }
+  }
+
+  set handler_matched [lsort -index 0 -integer $handler_matched]
+
+  foreach handler $handler_matched {
+    lassign $handler rank is_filter hname hargv
+    $hname $sock {*}$hargv
+    if {!($is_filter ne "" && $is_filter)} {
+      break
+    }
+  }
 
   return
 }
