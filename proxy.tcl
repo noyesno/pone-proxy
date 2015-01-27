@@ -1,4 +1,7 @@
 
+package require Tcl 8.6
+
+
 #Ref: Tcl nano proxy server http://wiki.tcl.tk/8833
 #Ref: Socks proxy http://wiki.tcl.tk/17263
 
@@ -14,6 +17,7 @@ package require proxy::socks5
 #package require proxy::http
 package require proxy::httpfsm
 package require proxy::ssl
+package require proxy::acl
 
 #------------------------------------------------------------------#
 

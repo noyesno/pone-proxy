@@ -19,6 +19,16 @@ fsm::bind socks5 accept {
   set sock    [fsm::var $fsm sock]
   set request [fsm::var $fsm request]
 
+  lassign [fconfigure $sock -peername] client_addr client_host client_port
+
+  if {![pone::proxy::acl::check $client_addr]} {
+    puts "DEBUG-SOCKS5: deny $client_addr"
+    fsm::goto $fsm close
+    return
+  }
+
+
+
   binary scan $request {cc} ver nmethod
 
   binary scan [read $sock $nmethod] {c*} methods
@@ -183,8 +193,8 @@ fsm::bind socks5 close {
 
   puts "DEBUG-SOCKS5: close $from $dir $to $host , $size bytes relay"
 
-  set clientsock [fsm::var $fsm sock]
-  set serversock [fsm::var $fsm serversock]
+  set clientsock [fsm::var $fsm sock -default ""]
+  set serversock [fsm::var $fsm serversock -default ""]
 
   dict for {sock -} [list $from 0 $to 0 $serversock 0 $clientsock 0] {
     if {$sock ne ""} {

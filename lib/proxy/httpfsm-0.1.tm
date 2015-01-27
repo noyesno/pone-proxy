@@ -81,14 +81,22 @@ fsm::bind http serve {
 }
 
 fsm::bind http proxy {
+  set sock    [fsm::var $fsm sock]
+
+
+
 
   if {!$::config(proxy.http)} {
     fsm::goto $fsm close
     return
   }
 
+  lassign [fconfigure $sock -peername] client_addr client_host client_port
 
-  set sock    [fsm::var $fsm sock]
+  if {![pone::proxy::acl::check $client_addr]} {
+    fsm::goto $fsm close
+    return
+  }
 
   set req    [pone::proxy::http::get $sock req]
   set method [dict get $req method]
@@ -163,9 +171,11 @@ proc accept_http_async {sock request} {
 
 
 namespace eval pone::proxy::http {
+  variable {}       [dict create]
   variable handlers [dict create]
 }
 
+# register * ?-fiter? ?-rank 10? [list hname hargv]
 proc pone::proxy::http::register {pattern args} {
   variable handlers
 
@@ -191,6 +201,41 @@ proc pone::proxy::http::register {pattern args} {
 namespace eval pone::proxy::http::handler {
   #
   pone::proxy::http::register * -rank 0 [list pone::proxy::http::handler::default ]
+  pone::proxy::http::register /checkin  -rank 1 [list pone::proxy::http::checkin]
+  pone::proxy::http::register /checkout -rank 1 [list pone::proxy::http::checkout]
+}
+
+proc pone::proxy::http::checkin {sock} {
+
+  lassign [fconfigure $sock -peername] client_addr client_host client_port
+  pone::proxy::acl::allow $client_addr
+
+  set body [pone::proxy::http::get $sock]
+
+  append body  "\n" "Pone Door Opended For $client_addr!"
+
+  puts $sock "HTTP/1.1 200 OK"
+  puts $sock "Content-Type: text/plain"
+  puts $sock "Content-Length: [string bytelength $body]"
+  puts $sock ""
+  puts -nonewline $sock $body
+  flush $sock
+}
+
+proc pone::proxy::http::checkout {sock} {
+
+  lassign [fconfigure $sock -peername] client_addr client_host client_port
+  pone::proxy::acl::deny $client_addr
+
+  set body [pone::proxy::http::get $sock]
+  append body  "\n" "Pone Door Closed For $client_addr!"
+
+  puts $sock "HTTP/1.1 200 OK"
+  puts $sock "Content-Type: text/plain"
+  puts $sock "Content-Length: [string bytelength $body]"
+  puts $sock ""
+  puts -nonewline $sock $body
+  flush $sock
 }
 
 proc pone::proxy::http::handler::default {sock args} {
@@ -240,6 +285,7 @@ proc pone::proxy::http::accept {sock {request ""}} {
     return 0
   }
 
+  # use a ::ini::
   dict set {} $sock req request $request
   dict set {} $sock req header [dict create] ;# request
   dict set {} $sock res header [dict create] ;# response
@@ -286,7 +332,7 @@ proc pone::proxy::http::serve {sock method path} {
     }
   }
 
-  set handler_matched [lsort -index 0 -integer $handler_matched]
+  set handler_matched [lsort -decr -index 0 -integer $handler_matched]
 
   foreach handler $handler_matched {
     lassign $handler rank is_filter hname hargv
